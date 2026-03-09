@@ -1,0 +1,100 @@
+name: Build Home Node
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest tests/ -v
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: space-router-node-macos-arm64
+          - os: macos-13
+            artifact: space-router-node-macos-x64
+          - os: windows-latest
+            artifact: space-router-node-windows-x64
+          - os: ubuntu-latest
+            artifact: space-router-node-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build binary
+        run: pyinstaller homenode.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv dist/space-router-node.exe "dist/${{ matrix.artifact }}.exe"
+          else
+            mv dist/space-router-node "dist/${{ matrix.artifact }}"
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            timeout 5 "dist/${{ matrix.artifact }}.exe" || true
+          else
+            timeout 5 "dist/${{ matrix.artifact }}" || true
+          fi
+        env:
+          SR_COORDINATION_API_URL: http://localhost:9999
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.exe
+
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: "Home Node Build #${{ github.run_number }}"
+          files: artifacts/**/*
+          draft: false
+          prerelease: true

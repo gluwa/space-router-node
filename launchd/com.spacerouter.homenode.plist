@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.spacerouter.homenode</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/spacerouter/space-router-node</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/spacerouter</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Required: Coordination API URL -->
+        <key>SR_COORDINATION_API_URL</key>
+        <string>https://coordination.spacerouter.io</string>
+
+        <!-- Optional: override auto-detected public IP -->
+        <!-- <key>SR_PUBLIC_IP</key> -->
+        <!-- <string>1.2.3.4</string> -->
+
+        <!-- Optional: node metadata -->
+        <key>SR_NODE_LABEL</key>
+        <string>macbook-home</string>
+        <key>SR_NODE_REGION</key>
+        <string>us-west</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/spacerouter-homenode.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/spacerouter-homenode.stderr.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>
