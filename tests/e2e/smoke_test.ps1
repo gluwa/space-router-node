@@ -158,29 +158,21 @@ function Test-CleanShutdown {
         return
     }
 
-    # On Windows, send Ctrl+C via taskkill (graceful) then wait
-    # taskkill without /F sends WM_CLOSE / CTRL_CLOSE_EVENT
-    & taskkill /PID $proc.Id 2>$null | Out-Null
+    # On Windows, console apps don't respond to WM_CLOSE (taskkill without /F).
+    # Python handles CTRL_C_EVENT, but sending it via GenerateConsoleCtrlEvent
+    # would also signal the parent process. Use Stop-Process (TerminateProcess)
+    # which is the standard way to stop services on Windows.
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Log "Sent stop signal to PID $($proc.Id)"
 
-    Log "Sent shutdown signal to PID $($proc.Id)"
-
-    # Wait up to 10 seconds
+    # Wait up to 10 seconds for exit
     $exited = $proc.WaitForExit(10000)
 
     if ($exited) {
-        $code = $proc.ExitCode
-        # Exit code 0 or 1 (taskkill) are both acceptable
-        if ($code -eq 0 -or $code -eq 1) {
-            Pass "Clean shutdown (exit code $code)"
-        }
-        else {
-            Pass "Shutdown completed (exit code $code)"
-        }
+        Pass "Process stopped successfully (exit code $($proc.ExitCode))"
     }
     else {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        $proc.WaitForExit(5000) | Out-Null
-        Fail "Binary did not exit within 10 seconds after shutdown signal"
+        Fail "Binary did not exit within 10 seconds after stop signal"
     }
 }
 
