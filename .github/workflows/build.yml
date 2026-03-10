@@ -32,7 +32,7 @@ jobs:
         include:
           - os: macos-14
             artifact: space-router-node-macos-arm64
-          - os: macos-13
+          - os: macos-15-large
             artifact: space-router-node-macos-x64
           - os: windows-latest
             artifact: space-router-node-windows-x64
