@@ -30,8 +30,8 @@ def ensure_certificates(cert_path: str, key_path: str) -> None:
     os.makedirs(os.path.dirname(cert_path) or ".", exist_ok=True)
     os.makedirs(os.path.dirname(key_path) or ".", exist_ok=True)
 
-    # Generate RSA private key
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # Generate RSA private key (4096-bit for long-term security)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
 
     # Build self-signed certificate (valid 365 days)
     subject = issuer = x509.Name([
@@ -51,19 +51,24 @@ def ensure_certificates(cert_path: str, key_path: str) -> None:
         .sign(key, hashes.SHA256())
     )
 
-    # Write key (no passphrase)
-    with open(key_path, "wb") as f:
-        f.write(
+    # Write key with restrictive permissions (0600)
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(
+            fd,
             key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
                 encryption_algorithm=serialization.NoEncryption(),
-            )
+            ),
         )
+    finally:
+        os.close(fd)
 
     # Write certificate
     with open(cert_path, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
+    os.chmod(cert_path, 0o644)
 
     logger.info("TLS certificate written to %s / %s", cert_path, key_path)
 
@@ -72,4 +77,11 @@ def create_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     """Return an SSL context configured for the Home Node server."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    
+    # Security Hardening: Enforce TLS 1.2 minimum and secure ciphers
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.options |= ssl.OP_NO_SSLv3
+    ctx.options |= ssl.OP_NO_COMPRESSION
+    ctx.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384')
+    
     return ctx

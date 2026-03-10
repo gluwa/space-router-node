@@ -1,4 +1,12 @@
+import os
 import pytest
+
+# Allow loopback targets in integration tests (SSRF protection bypass for testing only)
+os.environ["SR_ALLOW_LOOPBACK_TARGETS"] = "true"
+
+# Re-import after env is set
+import app.config
+app.config._ALLOW_LOOPBACK_TARGETS = True
 
 from app.config import Settings
 from app.tls import ensure_certificates

@@ -7,12 +7,68 @@ from its residential IP.
 """
 
 import asyncio
+import ipaddress
 import logging
 from urllib.parse import urlparse
 
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Security constants
+# ---------------------------------------------------------------------------
+
+MAX_HEADER_SIZE = 64 * 1024          # 64 KB cap on total request headers
+MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50 MB cap on request/response bodies
+MAX_CHUNK_SIZE = 10 * 1024 * 1024     # 10 MB cap per chunked transfer chunk
+
+# Private/reserved IP ranges — deny SSRF to internal networks
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("224.0.0.0/4"),      # multicast
+    ipaddress.ip_network("240.0.0.0/4"),      # reserved
+    ipaddress.ip_network("255.255.255.255/32"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+# Ports that should never be proxied (internal services)
+_BLOCKED_PORTS = {22, 23, 25, 135, 136, 137, 138, 139, 445, 3306, 5432, 6379, 11211, 27017}
+
+
+def _is_private_target(host: str, port: int) -> bool:
+    """Return True if the target host resolves to a private/reserved IP or a blocked port."""
+    # Testing bypass — never enable in production
+    from app.config import _ALLOW_LOOPBACK_TARGETS
+    if _ALLOW_LOOPBACK_TARGETS:
+        return False
+
+    if port in _BLOCKED_PORTS:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return any(addr in net for net in _BLOCKED_NETWORKS)
+    except ValueError:
+        # hostname, not IP — DNS resolution happens at connect time
+        # For hostnames we cannot pre-check, but we block obvious patterns
+        lower = host.lower()
+        if lower in ("localhost", "localhost.localdomain") or lower.endswith(".local"):
+            return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Shared protocol utilities (mirrored from proxy-gateway/app/proxy.py)
@@ -56,7 +112,9 @@ async def _read_request_head(
             if line == b"\r\n":
                 break
             header_data += line
-    except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionResetError):
+            if len(header_data) > MAX_HEADER_SIZE:
+                return None  # Header too large — reject
+    except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionResetError):
         return None
 
     headers = parse_headers(header_data)
@@ -133,6 +191,10 @@ def _bad_request(detail: str = "Bad Request") -> bytes:
     return _error_response(400, "Bad Request", detail)
 
 
+def _forbidden(detail: str = "Forbidden") -> bytes:
+    return _error_response(403, "Forbidden", detail)
+
+
 def _bad_gateway(detail: str = "Bad Gateway") -> bytes:
     return _error_response(502, "Bad Gateway", detail)
 
@@ -146,12 +208,21 @@ def _gateway_timeout(detail: str = "Gateway Timeout") -> bytes:
 # ---------------------------------------------------------------------------
 
 def _strip_spacerouter_headers(headers: dict[str, str]) -> dict[str, str]:
-    """Remove X-SpaceRouter-* and Proxy-Authorization headers."""
+    """Remove X-SpaceRouter-*, Proxy-Authorization, and other sensitive headers."""
+    # Standard headers to remove for anonymity and security
+    stripped_headers = {
+        "x-forwarded-for",
+        "x-real-ip",
+        "via",
+        "forwarded",
+        "proxy-authorization",
+        "proxy-connection",
+    }
     return {
         k: v
         for k, v in headers.items()
         if not k.lower().startswith(SPACEROUTER_HEADER_PREFIX)
-        and k.lower() != "proxy-authorization"
+        and k.lower() not in stripped_headers
     }
 
 
@@ -170,6 +241,13 @@ async def handle_connect(
     relay bytes bidirectionally between the client (Proxy Gateway) and the
     target server.
     """
+    # SSRF protection — block private/reserved targets
+    if _is_private_target(target_host, target_port):
+        logger.warning("CONNECT blocked — private target %s:%s", target_host, target_port)
+        client_writer.write(_forbidden("Target not allowed"))
+        await client_writer.drain()
+        return
+
     try:
         target_reader, target_writer = await asyncio.wait_for(
             asyncio.open_connection(target_host, target_port),
@@ -177,7 +255,7 @@ async def handle_connect(
         )
     except (OSError, asyncio.TimeoutError) as exc:
         logger.warning("CONNECT failed to %s:%s — %s", target_host, target_port, exc)
-        client_writer.write(_bad_gateway(f"Cannot connect to {target_host}:{target_port}"))
+        client_writer.write(_bad_gateway("Cannot connect to target"))
         await client_writer.drain()
         return
 
@@ -234,6 +312,13 @@ async def handle_http_forward(
         await client_writer.drain()
         return
 
+    # SSRF protection — block private/reserved targets
+    if _is_private_target(host, port):
+        logger.warning("HTTP forward blocked — private target %s:%s", host, port)
+        client_writer.write(_forbidden("Target not allowed"))
+        await client_writer.drain()
+        return
+
     # Connect to target
     try:
         target_reader, target_writer = await asyncio.wait_for(
@@ -242,7 +327,7 @@ async def handle_http_forward(
         )
     except (OSError, asyncio.TimeoutError) as exc:
         logger.warning("HTTP forward failed to %s:%s — %s", host, port, exc)
-        client_writer.write(_bad_gateway(f"Cannot connect to {host}:{port}"))
+        client_writer.write(_bad_gateway("Cannot connect to target"))
         await client_writer.drain()
         return
 
@@ -257,8 +342,12 @@ async def handle_http_forward(
         target_writer.write(request_head)
         await target_writer.drain()
 
-        # Forward request body if present
+        # Forward request body if present (with size cap)
         content_length = int(headers.get("Content-Length", headers.get("content-length", "0")))
+        if content_length > MAX_CONTENT_LENGTH:
+            client_writer.write(_bad_request("Request body too large"))
+            await client_writer.drain()
+            return
         if content_length > 0:
             remaining = content_length
             while remaining > 0:
@@ -329,6 +418,8 @@ async def handle_http_forward(
                 await client_writer.drain()
 
                 chunk_size = int(size_line.strip(), 16)
+                if chunk_size > MAX_CHUNK_SIZE:
+                    break  # Reject oversized chunks
                 if chunk_size == 0:
                     trailer = await target_reader.readuntil(b"\r\n")
                     client_writer.write(trailer)

@@ -1,4 +1,9 @@
+import logging
+import warnings
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -6,6 +11,12 @@ class Settings(BaseSettings):
 
     NODE_PORT: int = 9090
     COORDINATION_API_URL: str = "http://localhost:8000"
+
+    # Max concurrent proxy connections (DoS protection)
+    MAX_CONNECTIONS: int = 256
+
+    # Bind address — restrict to specific interface if needed
+    BIND_ADDRESS: str = "0.0.0.0"
 
     NODE_LABEL: str = ""
     NODE_REGION: str = ""
@@ -29,3 +40,17 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Warn if Coordination API uses plain HTTP in non-localhost scenarios
+if not settings.COORDINATION_API_URL.startswith("https://"):
+    if "localhost" not in settings.COORDINATION_API_URL and "127.0.0.1" not in settings.COORDINATION_API_URL:
+        warnings.warn(
+            f"COORDINATION_API_URL uses plain HTTP ({settings.COORDINATION_API_URL}). "
+            "This exposes registration data to MITM attacks. Use HTTPS in production.",
+            stacklevel=1,
+        )
+
+
+# Testing override — never set in production
+import os
+_ALLOW_LOOPBACK_TARGETS = os.environ.get("SR_ALLOW_LOOPBACK_TARGETS", "").lower() == "true"
