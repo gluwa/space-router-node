@@ -90,6 +90,36 @@ jobs:
           SR_PUBLIC_IP: 127.0.0.1
           SR_UPNP_ENABLED: "false"
 
+      # Build Windows NSIS installer with WinSW service wrapper
+      - name: Download WinSW
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $winsw_version = "3.0.0-alpha.11"
+          $url = "https://github.com/winsw/winsw/releases/download/v${winsw_version}/WinSW-x64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "packaging/windows/WinSW-x64.exe"
+          Write-Host "Downloaded WinSW ${winsw_version}"
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
+
+          $version = "${{ steps.version.outputs.version }}"
+          # Strip leading 'v' for installer version
+          $pkg_version = $version -replace '^v', ''
+
+          makensis /DVERSION=$pkg_version `
+                   /DBINARY="..\..\dist\${{ matrix.artifact }}.exe" `
+                   /DWINSW="WinSW-x64.exe" `
+                   packaging\windows\installer.nsi
+
+          Move-Item "packaging\windows\space-router-node-${pkg_version}-setup.exe" `
+                    "dist\${{ matrix.artifact }}-setup.exe"
+          Write-Host "Built installer: dist\${{ matrix.artifact }}-setup.exe"
+
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
         if: runner.os == 'Linux'
@@ -115,6 +145,7 @@ jobs:
           path: |
             dist/${{ matrix.artifact }}
             dist/${{ matrix.artifact }}.exe
+            dist/${{ matrix.artifact }}-setup.exe
             dist/${{ matrix.artifact }}.deb
             dist/${{ matrix.artifact }}.rpm
 

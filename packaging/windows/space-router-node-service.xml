@@ -1,0 +1,42 @@
+<!--
+  WinSW service wrapper configuration for Space Router Home Node.
+  See: https://github.com/winsw/winsw
+
+  This file is bundled alongside the binary and WinSW executable
+  by the NSIS installer.  The installer copies it to:
+      %ProgramFiles%\SpaceRouter\space-router-node-service.xml
+-->
+<service>
+  <id>SpaceRouterHomeNode</id>
+  <name>Space Router Home Node</name>
+  <description>Space Router residential proxy exit node daemon</description>
+
+  <executable>%BASE%\space-router-node.exe</executable>
+  <workingdirectory>%ProgramData%\SpaceRouter</workingdirectory>
+
+  <!-- Environment variables loaded from config file -->
+  <envFile>%ProgramData%\SpaceRouter\spacerouter.env</envFile>
+
+  <!-- Restart policy: progressive back-off on failure -->
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- Logging: roll by size, keep 5 x 10 MB files -->
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+    <logpath>%ProgramData%\SpaceRouter\logs</logpath>
+  </log>
+
+  <!-- Graceful shutdown timeout (seconds) -->
+  <stoptimeout>15 sec</stoptimeout>
+
+  <!-- Run under LocalSystem by default; admin can reconfigure -->
+  <serviceaccount>
+    <domain>NT AUTHORITY</domain>
+    <user>LocalSystem</user>
+    <allowservicelogon>true</allowservicelogon>
+  </serviceaccount>
+</service>
