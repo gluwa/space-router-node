@@ -7,6 +7,7 @@ from its residential IP.
 """
 
 import asyncio
+import base64
 import ipaddress
 import logging
 from urllib.parse import urlparse
@@ -287,36 +288,70 @@ async def relay_streams(
 # Error responses
 # ---------------------------------------------------------------------------
 
-def _error_response(status: int, reason: str, body: str) -> bytes:
+def _error_response(
+    status: int,
+    reason: str,
+    body: str,
+    request_id: str | None = None,
+) -> bytes:
     payload = body.encode()
+    extra_headers = ""
+    if request_id:
+        extra_headers = f"X-SpaceRouter-Request-Id: {request_id}\r\n"
     return (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: text/plain\r\n"
         f"Content-Length: {len(payload)}\r\n"
         f"Connection: close\r\n"
+        f"{extra_headers}"
         f"\r\n"
     ).encode() + payload
 
 
-def _bad_request(detail: str = "Bad Request") -> bytes:
-    return _error_response(400, "Bad Request", detail)
+def _bad_request(detail: str = "Bad Request", request_id: str | None = None) -> bytes:
+    return _error_response(400, "Bad Request", detail, request_id)
 
 
-def _forbidden(detail: str = "Forbidden") -> bytes:
-    return _error_response(403, "Forbidden", detail)
+def _forbidden(detail: str = "Forbidden", request_id: str | None = None) -> bytes:
+    return _error_response(403, "Forbidden", detail, request_id)
 
 
-def _bad_gateway(detail: str = "Bad Gateway") -> bytes:
-    return _error_response(502, "Bad Gateway", detail)
+def _bad_gateway(detail: str = "Bad Gateway", request_id: str | None = None) -> bytes:
+    return _error_response(502, "Bad Gateway", detail, request_id)
 
 
-def _gateway_timeout(detail: str = "Gateway Timeout") -> bytes:
-    return _error_response(504, "Gateway Timeout", detail)
+def _gateway_timeout(detail: str = "Gateway Timeout", request_id: str | None = None) -> bytes:
+    return _error_response(504, "Gateway Timeout", detail, request_id)
+
+
+def _proxy_auth_required(request_id: str | None = None) -> bytes:
+    return _error_response(407, "Proxy Authentication Required", "Proxy Authentication Required", request_id)
 
 
 # ---------------------------------------------------------------------------
 # Strip internal headers before forwarding to the target
 # ---------------------------------------------------------------------------
+
+def _parse_basic_auth(auth_header: str) -> tuple[str, str] | None:
+    """Parse a ``Proxy-Authorization: Basic <b64>`` header.
+
+    Returns ``(username, password)`` on success, or ``None`` if the header is
+    missing, malformed, or not Basic scheme.
+    """
+    if not auth_header:
+        return None
+    parts = auth_header.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(parts[1]).decode("utf-8")
+    except Exception:
+        return None
+    if ":" not in decoded:
+        return None
+    username, _, password = decoded.partition(":")
+    return username, password
+
 
 def _strip_spacerouter_headers(headers: dict[str, str]) -> dict[str, str]:
     """Remove X-SpaceRouter-*, Proxy-Authorization, and other sensitive headers."""
@@ -347,15 +382,18 @@ async def handle_connect(
     target_host: str,
     target_port: int,
     settings: Settings,
+    request_id: str | None = None,
 ) -> None:
     """Open a TCP connection to *target_host:target_port*, reply 200, then
     relay bytes bidirectionally between the client (Proxy Gateway) and the
     target server.
     """
+    rid_tag = f" [request_id={request_id}]" if request_id else ""
+
     # SSRF protection — block private/reserved targets (static check)
     if _is_private_target(target_host, target_port):
-        logger.warning("CONNECT blocked — private target %s:%s", target_host, target_port)
-        client_writer.write(_forbidden("Target not allowed"))
+        logger.warning("CONNECT blocked — private target %s:%s%s", target_host, target_port, rid_tag)
+        client_writer.write(_forbidden("Target not allowed", request_id))
         await client_writer.drain()
         return
 
@@ -365,13 +403,13 @@ async def handle_connect(
             target_host, target_port, settings.REQUEST_TIMEOUT,
         )
     except _DNSRebindingError as exc:
-        logger.warning("CONNECT blocked (DNS rebinding) — %s", exc)
-        client_writer.write(_forbidden("Target not allowed"))
+        logger.warning("CONNECT blocked (DNS rebinding) — %s%s", exc, rid_tag)
+        client_writer.write(_forbidden("Target not allowed", request_id))
         await client_writer.drain()
         return
     except (OSError, asyncio.TimeoutError) as exc:
-        logger.warning("CONNECT failed to %s:%s — %s", target_host, target_port, exc)
-        client_writer.write(_bad_gateway("Cannot connect to target"))
+        logger.warning("CONNECT failed to %s:%s — %s%s", target_host, target_port, exc, rid_tag)
+        client_writer.write(_bad_gateway("Cannot connect to target", request_id))
         await client_writer.drain()
         return
 
@@ -408,6 +446,7 @@ async def handle_http_forward(
     version: str,
     headers: dict[str, str],
     settings: Settings,
+    request_id: str | None = None,
 ) -> None:
     """Forward an HTTP request to the target server and stream the response
     back to the client (Proxy Gateway).
@@ -416,6 +455,8 @@ async def handle_http_forward(
     it, connect to the origin, rewrite the request line to a relative path,
     and relay request + response.
     """
+    rid_tag = f" [request_id={request_id}]" if request_id else ""
+
     parsed = urlparse(target)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -424,14 +465,14 @@ async def handle_http_forward(
         path = f"{path}?{parsed.query}"
 
     if not host:
-        client_writer.write(_bad_request("Missing host in target URL"))
+        client_writer.write(_bad_request("Missing host in target URL", request_id))
         await client_writer.drain()
         return
 
     # SSRF protection — block private/reserved targets (static check)
     if _is_private_target(host, port):
-        logger.warning("HTTP forward blocked — private target %s:%s", host, port)
-        client_writer.write(_forbidden("Target not allowed"))
+        logger.warning("HTTP forward blocked — private target %s:%s%s", host, port, rid_tag)
+        client_writer.write(_forbidden("Target not allowed", request_id))
         await client_writer.drain()
         return
 
@@ -441,13 +482,13 @@ async def handle_http_forward(
             host, port, settings.REQUEST_TIMEOUT,
         )
     except _DNSRebindingError as exc:
-        logger.warning("HTTP forward blocked (DNS rebinding) — %s", exc)
-        client_writer.write(_forbidden("Target not allowed"))
+        logger.warning("HTTP forward blocked (DNS rebinding) — %s%s", exc, rid_tag)
+        client_writer.write(_forbidden("Target not allowed", request_id))
         await client_writer.drain()
         return
     except (OSError, asyncio.TimeoutError) as exc:
-        logger.warning("HTTP forward failed to %s:%s — %s", host, port, exc)
-        client_writer.write(_bad_gateway("Cannot connect to target"))
+        logger.warning("HTTP forward failed to %s:%s — %s%s", host, port, exc, rid_tag)
+        client_writer.write(_bad_gateway("Cannot connect to target", request_id))
         await client_writer.drain()
         return
 
@@ -465,7 +506,7 @@ async def handle_http_forward(
         # Forward request body if present (with size cap)
         content_length = int(headers.get("Content-Length", headers.get("content-length", "0")))
         if content_length > MAX_CONTENT_LENGTH:
-            client_writer.write(_bad_request("Request body too large"))
+            client_writer.write(_bad_request("Request body too large", request_id))
             await client_writer.drain()
             return
         if content_length > 0:
@@ -485,7 +526,7 @@ async def handle_http_forward(
                 timeout=settings.REQUEST_TIMEOUT,
             )
         except (asyncio.TimeoutError, asyncio.IncompleteReadError):
-            client_writer.write(_gateway_timeout("Target server timed out"))
+            client_writer.write(_gateway_timeout("Target server timed out", request_id))
             await client_writer.drain()
             return
 
@@ -635,16 +676,55 @@ async def handle_client(
 
             _raw_head, method, target, version, headers = result
 
+            # --- Issue #51: Extract X-SpaceRouter-Request-Id ---
+            request_id: str | None = (
+                headers.get("X-SpaceRouter-Request-Id")
+                or headers.get("x-spacerouter-request-id")
+                or None
+            )
+
+            # --- Issue #52: Validate Proxy-Authorization ---
+            if settings.PROXY_AUTH_USERNAME and settings.PROXY_AUTH_PASSWORD:
+                auth_header = (
+                    headers.get("Proxy-Authorization")
+                    or headers.get("proxy-authorization")
+                    or ""
+                )
+                parsed_auth = _parse_basic_auth(auth_header)
+                if (
+                    parsed_auth is None
+                    or parsed_auth[0] != settings.PROXY_AUTH_USERNAME
+                    or parsed_auth[1] != settings.PROXY_AUTH_PASSWORD
+                ):
+                    logger.warning(
+                        "Proxy auth failed from %s%s",
+                        peer,
+                        f" [request_id={request_id}]" if request_id else "",
+                    )
+                    writer.write(_proxy_auth_required(request_id))
+                    await writer.drain()
+                    return
+
             if method.upper() == "CONNECT":
                 host_port = target.split(":")
                 target_host = host_port[0]
                 target_port = int(host_port[1]) if len(host_port) > 1 else 443
 
-                logger.info("CONNECT %s:%s", target_host, target_port)
-                await handle_connect(reader, writer, target_host, target_port, settings)
+                logger.info(
+                    "CONNECT %s:%s%s",
+                    target_host,
+                    target_port,
+                    f" [request_id={request_id}]" if request_id else "",
+                )
+                await handle_connect(reader, writer, target_host, target_port, settings, request_id)
             else:
-                logger.info("%s %s", method, target)
-                await handle_http_forward(reader, writer, method, target, version, headers, settings)
+                logger.info(
+                    "%s %s%s",
+                    method,
+                    target,
+                    f" [request_id={request_id}]" if request_id else "",
+                )
+                await handle_http_forward(reader, writer, method, target, version, headers, settings, request_id)
 
         except Exception:
             logger.exception("Unhandled error in client handler")

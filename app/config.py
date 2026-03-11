@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     MTLS_ENABLED: bool = False
     GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"
 
+    # Proxy-Authorization validation (Issue #52)
+    # If both are set, the Home Node validates Basic auth from the Gateway.
+    # Leave empty to disable validation (backward compatible).
+    PROXY_AUTH_USERNAME: str = ""
+    PROXY_AUTH_PASSWORD: str = ""
+
 
 settings = Settings()
 
