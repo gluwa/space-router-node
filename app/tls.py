@@ -77,11 +77,33 @@ def create_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     """Return an SSL context configured for the Home Node server."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
-    
+
     # Security Hardening: Enforce TLS 1.2 minimum and secure ciphers
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.options |= ssl.OP_NO_SSLv3
     ctx.options |= ssl.OP_NO_COMPRESSION
     ctx.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384')
-    
+
+    return ctx
+
+
+def create_mtls_server_ssl_context(
+    cert_path: str,
+    key_path: str,
+    gateway_ca_cert_path: str,
+) -> ssl.SSLContext:
+    """Return an SSL context that requires client certs signed by the gateway CA.
+
+    Builds on :func:`create_server_ssl_context` and additionally requires a
+    valid client certificate during the TLS handshake.  Connections without a
+    cert (or with a cert signed by an untrusted CA) are rejected at the
+    transport layer before any application code runs.
+    """
+    ctx = create_server_ssl_context(cert_path, key_path)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cafile=gateway_ca_cert_path)
+    logger.info(
+        "mTLS enabled — requiring client certs signed by CA at %s",
+        gateway_ca_cert_path,
+    )
     return ctx

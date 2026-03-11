@@ -14,6 +14,7 @@ Lifecycle:
 import asyncio
 import functools
 import logging
+import os
 import signal
 import sys
 
@@ -21,8 +22,8 @@ import httpx
 
 from app.config import settings
 from app.proxy_handler import handle_client
-from app.registration import deregister_node, detect_public_ip, register_node
-from app.tls import create_server_ssl_context, ensure_certificates
+from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
+from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
 
 logging.basicConfig(
@@ -85,16 +86,32 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
 
         # 3. Register with Coordination API
         try:
-            node_id = await register_node(
+            node_id, gateway_ca_cert = await register_node(
                 http_client, s, public_ip, upnp_endpoint=upnp_endpoint,
             )
         except Exception:
             logger.exception("Failed to register with Coordination API — aborting")
             sys.exit(1)
 
+        # 3b. Save gateway CA cert if provided
+        if gateway_ca_cert:
+            save_gateway_ca_cert(gateway_ca_cert, s.GATEWAY_CA_CERT_PATH)
+
         # 4. Start TLS server
         ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
-        ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+
+        if s.MTLS_ENABLED:
+            if not os.path.isfile(s.GATEWAY_CA_CERT_PATH):
+                logger.error(
+                    "mTLS enabled but gateway CA cert not found at %s — aborting",
+                    s.GATEWAY_CA_CERT_PATH,
+                )
+                sys.exit(1)
+            ssl_ctx = create_mtls_server_ssl_context(
+                s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
+            )
+        else:
+            ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
 
         handler = functools.partial(handle_client, settings=s)
         server = await asyncio.start_server(

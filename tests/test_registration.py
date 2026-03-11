@@ -5,7 +5,7 @@ import respx
 from httpx import Response
 
 from app.config import Settings
-from app.registration import deregister_node, detect_public_ip, register_node
+from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
 
 
 @pytest.fixture
@@ -112,9 +112,10 @@ class TestRegisterNode:
 
         import httpx
         async with httpx.AsyncClient() as client:
-            node_id = await register_node(client, reg_settings, "1.2.3.4")
+            node_id, gateway_ca_cert = await register_node(client, reg_settings, "1.2.3.4")
 
         assert node_id == "node-abc-123"
+        assert gateway_ca_cert is None
 
         # Verify the request payload
         req = respx.calls[0].request
@@ -147,12 +148,13 @@ class TestRegisterNode:
 
         import httpx
         async with httpx.AsyncClient() as client:
-            node_id = await register_node(
+            node_id, gateway_ca_cert = await register_node(
                 client, reg_settings, "1.2.3.4",
                 upnp_endpoint=("203.0.113.5", 9090),
             )
 
         assert node_id == "node-upnp-456"
+        assert gateway_ca_cert is None
 
         req = respx.calls[0].request
         import json
@@ -184,9 +186,10 @@ class TestRegisterNode:
 
         import httpx
         async with httpx.AsyncClient() as client:
-            node_id = await register_node(client, reg_settings, "1.2.3.4")
+            node_id, gateway_ca_cert = await register_node(client, reg_settings, "1.2.3.4")
 
         assert node_id == "node-classified"
+        assert gateway_ca_cert is None
 
     @pytest.mark.asyncio
     @respx.mock
@@ -206,10 +209,11 @@ class TestRegisterNode:
 
         import httpx
         async with httpx.AsyncClient() as client:
-            node_id = await register_node(client, reg_settings, "1.2.3.4")
+            node_id, gateway_ca_cert = await register_node(client, reg_settings, "1.2.3.4")
 
         # Should succeed without KeyError
         assert node_id == "node-no-class"
+        assert gateway_ca_cert is None
 
     @pytest.mark.asyncio
     @respx.mock
@@ -222,6 +226,55 @@ class TestRegisterNode:
         async with httpx.AsyncClient() as client:
             with pytest.raises(httpx.HTTPStatusError):
                 await register_node(client, reg_settings, "1.2.3.4")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_register_returns_gateway_ca_cert(self, reg_settings):
+        """Registration response with gateway_ca_cert should return it."""
+        ca_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n-----END CERTIFICATE-----"
+        respx.post("http://coordination:8000/nodes").mock(
+            return_value=Response(201, json={
+                "id": "node-mtls-1",
+                "endpoint_url": "https://1.2.3.4:9090",
+                "node_type": "residential",
+                "status": "online",
+                "health_score": 1.0,
+                "gateway_ca_cert": ca_pem,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            node_id, gateway_ca_cert = await register_node(client, reg_settings, "1.2.3.4")
+
+        assert node_id == "node-mtls-1"
+        assert gateway_ca_cert == ca_pem
+
+
+# ---------------------------------------------------------------------------
+# save_gateway_ca_cert
+# ---------------------------------------------------------------------------
+
+class TestSaveGatewayCACert:
+    def test_save_creates_file(self, tmp_path):
+        ca_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n-----END CERTIFICATE-----"
+        path = str(tmp_path / "certs" / "gateway-ca.crt")
+        save_gateway_ca_cert(ca_pem, path)
+
+        with open(path) as f:
+            assert f.read() == ca_pem
+
+    def test_save_sets_permissions(self, tmp_path):
+        import os
+        import stat
+
+        ca_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n-----END CERTIFICATE-----"
+        path = str(tmp_path / "gateway-ca.crt")
+        save_gateway_ca_cert(ca_pem, path)
+
+        mode = os.stat(path).st_mode & 0o777
+        assert mode == 0o644
 
 
 # ---------------------------------------------------------------------------

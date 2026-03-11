@@ -7,6 +7,7 @@ Lifecycle:
 """
 
 import logging
+import os
 
 import httpx
 
@@ -51,7 +52,7 @@ async def register_node(
     public_ip: str,
     *,
     upnp_endpoint: tuple[str, int] | None = None,
-) -> str:
+) -> tuple[str, str | None]:
     """Register this node with the Coordination API.
 
     If *upnp_endpoint* is provided (``(external_ip, external_port)``),
@@ -59,7 +60,7 @@ async def register_node(
     *public_ip* is sent as metadata.  Otherwise falls back to the public
     IP with the configured port (requires manual port forwarding).
 
-    Returns the ``node_id`` assigned by the API.
+    Returns ``(node_id, gateway_ca_cert_pem_or_None)``.
     Raises on failure — the caller should abort startup.
     """
     if upnp_endpoint:
@@ -91,13 +92,24 @@ async def register_node(
     resp.raise_for_status()
     data = resp.json()
     node_id = data["id"]
+    gateway_ca_cert = data.get("gateway_ca_cert")
     ip_type = data.get("ip_type", "unknown")
     ip_region = data.get("ip_region", "unknown")
     logger.info(
-        "Registered as node %s (ip_type=%s, ip_region=%s)",
+        "Registered as node %s (ip_type=%s, ip_region=%s, mtls_ca=%s)",
         node_id, ip_type, ip_region,
+        "provided" if gateway_ca_cert else "not provided",
     )
-    return node_id
+    return node_id, gateway_ca_cert
+
+
+def save_gateway_ca_cert(pem_data: str, path: str) -> None:
+    """Write the gateway CA certificate PEM to disk."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        f.write(pem_data)
+    os.chmod(path, 0o644)
+    logger.info("Gateway CA certificate saved to %s", path)
 
 
 async def deregister_node(

@@ -431,7 +431,10 @@ class TestHeaderStripping:
             assert "host" in received_headers
 
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ssl.SSLError:
+                pass
         finally:
             home.close()
             await home.wait_closed()

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     TLS_CERT_PATH: str = "certs/node.crt"
     TLS_KEY_PATH: str = "certs/node.key"
 
+    # mTLS — Gateway authentication
+    MTLS_ENABLED: bool = False
+    GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"
+
 
 settings = Settings()
 
