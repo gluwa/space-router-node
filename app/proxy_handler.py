@@ -7,6 +7,7 @@ from its residential IP.
 """
 
 import asyncio
+import base64
 import ipaddress
 import logging
 from urllib.parse import urlparse
@@ -321,6 +322,31 @@ def _bad_gateway(detail: str = "Bad Gateway", request_id: str | None = None) -> 
 
 def _gateway_timeout(detail: str = "Gateway Timeout", request_id: str | None = None) -> bytes:
     return _error_response(504, "Gateway Timeout", detail, request_id)
+
+
+def _proxy_auth_required(request_id: str | None = None) -> bytes:
+    return _error_response(407, "Proxy Authentication Required", "Proxy Authentication Required", request_id)
+
+
+def _parse_basic_auth(auth_header: str) -> tuple[str, str] | None:
+    """Parse a ``Proxy-Authorization: Basic <b64>`` header.
+
+    Returns ``(username, password)`` on success, or ``None`` if the header is
+    missing, malformed, or not Basic scheme.
+    """
+    if not auth_header:
+        return None
+    parts = auth_header.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(parts[1]).decode("utf-8")
+    except Exception:
+        return None
+    if ":" not in decoded:
+        return None
+    username, _, password = decoded.partition(":")
+    return username, password
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +682,28 @@ async def handle_client(
                 or headers.get("x-spacerouter-request-id")
                 or None
             )
+
+            # Validate Proxy-Authorization if credentials are configured
+            if settings.PROXY_AUTH_USERNAME and settings.PROXY_AUTH_PASSWORD:
+                auth_header = (
+                    headers.get("Proxy-Authorization")
+                    or headers.get("proxy-authorization")
+                    or ""
+                )
+                parsed_auth = _parse_basic_auth(auth_header)
+                if (
+                    parsed_auth is None
+                    or parsed_auth[0] != settings.PROXY_AUTH_USERNAME
+                    or parsed_auth[1] != settings.PROXY_AUTH_PASSWORD
+                ):
+                    logger.warning(
+                        "Proxy auth failed from %s%s",
+                        peer,
+                        f" [request_id={request_id}]" if request_id else "",
+                    )
+                    writer.write(_proxy_auth_required(request_id))
+                    await writer.drain()
+                    return
 
             if method.upper() == "CONNECT":
                 host_port = target.split(":")

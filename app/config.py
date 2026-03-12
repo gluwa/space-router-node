@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     MTLS_ENABLED: bool = False
     GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"
 
+    # Proxy-Authorization — validate credentials from Gateway
+    # If both are set, inbound requests must present matching Basic auth.
+    # If either is empty, auth validation is skipped (backward compatible).
+    PROXY_AUTH_USERNAME: str = ""
+    PROXY_AUTH_PASSWORD: str = ""
+
 
 settings = Settings()
 
