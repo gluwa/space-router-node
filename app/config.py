@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SR_", env_file=".env")
 
     NODE_PORT: int = 9090
-    COORDINATION_API_URL: str = "http://localhost:8000"
+    COORDINATION_API_URL: str = "https://coordination.spacerouter.org"
 
     # Max concurrent proxy connections (DoS protection)
     MAX_CONNECTIONS: int = 256

@@ -22,7 +22,7 @@ import httpx
 
 from app.config import settings
 from app.proxy_handler import handle_client
-from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
+from app.registration import classify_ip, deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
 from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
 
@@ -84,10 +84,15 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
                 logger.error("Cannot detect public IP — aborting")
                 sys.exit(1)
 
+        # 2b. Classify the public IP (type, region, AS info)
+        ip_classification = await classify_ip(http_client, public_ip)
+
         # 3. Register with Coordination API
         try:
             node_id, gateway_ca_cert = await register_node(
-                http_client, s, public_ip, upnp_endpoint=upnp_endpoint,
+                http_client, s, public_ip,
+                upnp_endpoint=upnp_endpoint,
+                ip_classification=ip_classification,
             )
         except Exception:
             logger.exception("Failed to register with Coordination API — aborting")
