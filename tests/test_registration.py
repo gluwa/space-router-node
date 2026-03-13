@@ -5,7 +5,14 @@ import respx
 from httpx import Response
 
 from app.config import Settings
-from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
+from app.registration import (
+    IPClassification,
+    classify_ip,
+    deregister_node,
+    detect_public_ip,
+    register_node,
+    save_gateway_ca_cert,
+)
 
 
 @pytest.fixture
@@ -87,6 +94,92 @@ class TestDetectPublicIP:
         async with httpx.AsyncClient() as client:
             with pytest.raises(RuntimeError, match="Failed to detect"):
                 await detect_public_ip(client)
+
+
+# ---------------------------------------------------------------------------
+# classify_ip
+# ---------------------------------------------------------------------------
+
+class TestClassifyIP:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_first_service_succeeds(self):
+        respx.get("http://ip-api.com/json/1.2.3.4?fields=status,countryCode,as,hosting").mock(
+            return_value=Response(200, json={
+                "status": "success",
+                "countryCode": "US",
+                "as": "AS15169 Google LLC",
+                "hosting": True,
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            result = await classify_ip(client, "1.2.3.4")
+
+        assert result.ip_type == "hosting"
+        assert result.ip_region == "US"
+        assert result.as_type == "AS15169 Google LLC"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_residential_ip(self):
+        respx.get("http://ip-api.com/json/183.98.86.205?fields=status,countryCode,as,hosting").mock(
+            return_value=Response(200, json={
+                "status": "success",
+                "countryCode": "KR",
+                "as": "AS4766 Korea Telecom",
+                "hosting": False,
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            result = await classify_ip(client, "183.98.86.205")
+
+        assert result.ip_type == "residential"
+        assert result.ip_region == "KR"
+        assert result.as_type == "AS4766 Korea Telecom"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_fallback_to_second_service(self):
+        respx.get("http://ip-api.com/json/1.2.3.4?fields=status,countryCode,as,hosting").mock(
+            return_value=Response(500)
+        )
+        respx.get("https://ipapi.co/1.2.3.4/json/").mock(
+            return_value=Response(200, json={
+                "country_code": "DE",
+                "asn": 13335,
+                "org": "Cloudflare Inc",
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            result = await classify_ip(client, "1.2.3.4")
+
+        assert result.ip_type == "residential"
+        assert result.ip_region == "DE"
+        assert result.as_type == "AS13335 Cloudflare Inc"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_all_services_fail_returns_unknown(self):
+        respx.get("http://ip-api.com/json/1.2.3.4?fields=status,countryCode,as,hosting").mock(
+            return_value=Response(500)
+        )
+        respx.get("https://ipapi.co/1.2.3.4/json/").mock(
+            return_value=Response(500)
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            result = await classify_ip(client, "1.2.3.4")
+
+        assert result.ip_type == "unknown"
+        assert result.ip_region == "unknown"
+        assert result.as_type == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +307,74 @@ class TestRegisterNode:
         # Should succeed without KeyError
         assert node_id == "node-no-class"
         assert gateway_ca_cert is None
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_register_sends_ip_classification(self, reg_settings):
+        """When ip_classification is provided, those fields are included in the payload."""
+        respx.post("http://coordination:8000/nodes").mock(
+            return_value=Response(201, json={
+                "id": "node-classified-2",
+                "endpoint_url": "https://1.2.3.4:9090",
+                "node_type": "residential",
+                "status": "online",
+                "health_score": 1.0,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        )
+
+        classification = IPClassification(
+            ip_type="residential",
+            ip_region="KR",
+            as_type="AS4766 Korea Telecom",
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            node_id, _ = await register_node(
+                client, reg_settings, "1.2.3.4",
+                ip_classification=classification,
+            )
+
+        assert node_id == "node-classified-2"
+
+        req = respx.calls[0].request
+        import json
+        body = json.loads(req.content)
+        assert body["ip_type"] == "residential"
+        assert body["ip_region"] == "KR"
+        assert body["as_type"] == "AS4766 Korea Telecom"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_register_skips_unknown_classification(self, reg_settings):
+        """When ip_classification is 'unknown', those fields are NOT sent."""
+        respx.post("http://coordination:8000/nodes").mock(
+            return_value=Response(201, json={
+                "id": "node-unknown-class",
+                "endpoint_url": "https://1.2.3.4:9090",
+                "node_type": "residential",
+                "status": "online",
+                "health_score": 1.0,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        )
+
+        classification = IPClassification.unknown()
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            node_id, _ = await register_node(
+                client, reg_settings, "1.2.3.4",
+                ip_classification=classification,
+            )
+
+        req = respx.calls[0].request
+        import json
+        body = json.loads(req.content)
+        assert "ip_type" not in body
+        assert "ip_region" not in body
+        assert "as_type" not in body
 
     @pytest.mark.asyncio
     @respx.mock

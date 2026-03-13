@@ -23,11 +23,7 @@ The Home Node:
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure
-export SR_COORDINATION_API_URL=https://spacerouter-coordination-api.fly.dev
-export SR_UPNP_ENABLED=true
-
-# Run
+# Run (uses default Coordination API URL)
 python -m app.main
 ```
 
@@ -35,7 +31,7 @@ python -m app.main
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `SR_COORDINATION_API_URL` | `http://localhost:8000` | Coordination API URL |
+| `SR_COORDINATION_API_URL` | `https://coordination.spacerouter.org` | Coordination API URL |
 | `SR_NODE_PORT` | `9090` | Port for incoming proxy connections |
 | `SR_NODE_LABEL` | `""` | Human-readable label for this node |
 | `SR_NODE_REGION` | `""` | Geographic region (e.g. `us-west`, `KR`) |
